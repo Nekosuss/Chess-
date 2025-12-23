@@ -1,0 +1,16 @@
+# Ignore dependency folders
+node_modules/
+__pycache__/
+venv/
+env/
+
+# Ignore system files
+.DS_Store
+
+# Ignore heavy executables
+*.exe
+*.dll
+
+# Ignore build files
+dist/
+build/
