@@ -2,261 +2,251 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import axios from 'axios';
-import { ChevronLeft, ChevronRight, Upload, FileText } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Upload, Activity, Trophy, Volume2, VolumeX, Target } from 'lucide-react';
+import EvaluationGraph from './EvaluationGraph'; 
 
 const ChessAnalyzer = () => {
   const [game, setGame] = useState(new Chess());
   const [analysis, setAnalysis] = useState([]);
+  const [accuracy, setAccuracy] = useState(null);
   const [currentMoveIndex, setCurrentMoveIndex] = useState(-1);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
   
-  // New state for live analysis (Drag & Drop)
+  // Audio State
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  
+  // Live analysis state
   const [liveEval, setLiveEval] = useState(null);
   const [liveBestMove, setLiveBestMove] = useState(null);
-
   const moveListRef = useRef(null);
 
-  // Convert raw Centipawns to standard Eval (e.g. 150 -> +1.50)
+  // --- AUDIO ENGINE ---
+  const playSound = (type) => {
+    if (!soundEnabled) return;
+    try {
+        const audio = new Audio(`/sounds/${type}.mp3`);
+        audio.volume = 0.5; 
+        audio.play().catch(e => console.warn("Audio play failed:", e));
+    } catch (e) {
+        console.warn("Audio error:", e);
+    }
+  };
+
+  // --- HELPERS ---
   const formatEval = (cp) => {
     if (cp === undefined || cp === null) return "-";
-    if (cp === 10000) return "MATE (White)";
-    if (cp === -10000) return "MATE (Black)";
+    if (cp >= 9900) return "M+"; 
+    if (cp <= -9900) return "M-"; 
     const score = cp / 100;
     return score > 0 ? `+${score.toFixed(2)}` : score.toFixed(2);
   };
 
-  // Helper to get symbol for classification
-  const getMoveSymbol = (cls) => {
-    if (cls === "Blunder") return "??";
-    if (cls === "Mistake") return "?";
-    if (cls === "Inaccuracy") return "?!";
-    return "";
+  const getMoveBadge = (cls) => {
+    if (!cls) return null;
+    switch(cls) {
+        case "Brilliant": return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-500/20 text-teal-400 border border-teal-500/30 shadow-[0_0_8px_rgba(45,212,191,0.2)]">!!</span>;
+        case "Best": return <span className="text-teal-400 text-sm drop-shadow-md">★</span>;
+        case "Excellent": return <span className="text-green-400 text-[10px] font-bold">✓</span>;
+        case "Inaccuracy": return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">?!</span>;
+        case "Mistake": return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/30">?</span>;
+        case "Blunder": return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30 shadow-[0_0_8px_rgba(248,113,113,0.3)]">??</span>;
+        default: return null;
+    }
   };
 
-  // Handle File Upload
+  const getGraphData = () => {
+    if (!analysis || analysis.length === 0) return [];
+    return analysis.map((move, index) => ({
+      moveIndex: index,
+      score: Math.max(-8, Math.min(8, (move.eval_cp || 0) / 100))
+    }));
+  };
+
+  // --- HANDLERS ---
   const handleFileUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
-
     setIsLoading(true);
-    setError(null);
-    setLiveEval(null); 
+    setLiveEval(null);
+    setAnalysis([]);
+    setAccuracy(null);
+    playSound('move'); 
     
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:8000/analyze-pgn', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-
+      const response = await axios.post('http://localhost:8000/analyze-pgn', formData);
       const newGame = new Chess();
       setGame(newGame);
-      setAnalysis(response.data.moves);
+      setAnalysis(response.data.moves || []);
+      setAccuracy(response.data.accuracy);
       setCurrentMoveIndex(-1);
     } catch (err) {
       console.error(err);
-      setError("Failed to analyze. Is backend running on port 8000?");
+      alert("Backend Error: " + (err.response?.data?.detail || "Check console"));
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Navigation Logic
   const goToMove = (index) => {
     if (index < -1 || index >= analysis.length) return;
+    
+    if (index >= 0) {
+        const moveData = analysis[index];
+        if (moveData.classification === "Blunder") playSound('blunder');
+        else playSound('move');
+    }
 
     const newGame = new Chess();
-    for (let i = 0; i <= index; i++) {
-      newGame.move(analysis[i].san);
-    }
+    for (let i = 0; i <= index; i++) newGame.move(analysis[i].san);
     setGame(newGame);
     setCurrentMoveIndex(index);
     setLiveEval(null); 
     setLiveBestMove(null);
   };
 
-  // Handle Drag & Drop (Making a move)
+  // --- CRITICAL FIX: onDrop logic ---
   const onDrop = (sourceSquare, targetSquare) => {
     try {
+      // 1. Validate move with chess.js
       const newGame = new Chess(game.fen());
-      const move = newGame.move({
-        from: sourceSquare,
-        to: targetSquare,
-        promotion: 'q',
-      });
+      const move = newGame.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
+      
+      if (!move) return false; // Illegal move -> snap back
+      
+      // 2. Play Sound
+      if (newGame.in_check()) playSound('check');
+      else if (move.captured) playSound('capture');
+      else playSound('move');
 
-      if (move === null) return false; 
-
+      // 3. Update React State immediately
       setGame(newGame);
       setLiveEval("..."); 
       
+      // 4. Async Backend Call (Doesn't block UI)
       axios.post('http://localhost:8000/analyze-fen', { fen: newGame.fen() })
-        .then(res => {
-          setLiveEval(res.data.eval_cp);
-          setLiveBestMove(res.data.best_move);
-        });
-
-      return true;
-    } catch (e) {
-      return false;
+        .then(res => { setLiveEval(res.data.eval_cp); setLiveBestMove(res.data.best_move); })
+        .catch(err => console.error("Eval failed", err));
+      
+      return true; // Return true to react-chessboard
+    } catch (e) { 
+      console.error("Move failed:", e);
+      return false; 
     }
   };
 
-  // Handle Keyboard Arrow Keys
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (analysis.length === 0) return;
-
-      if (e.key === "ArrowRight") {
-        goToMove(currentMoveIndex + 1);
-      } else if (e.key === "ArrowLeft") {
-        goToMove(currentMoveIndex - 1);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [currentMoveIndex, analysis]);
-
-  // Scroll to active move
   useEffect(() => {
     if (moveListRef.current) {
-        const active = moveListRef.current.querySelector('.bg-blue-600');
-        if(active) {
-            active.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
+        const active = moveListRef.current.querySelector('[data-active="true"]');
+        if(active) active.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [currentMoveIndex]);
 
-  // Determine Eval and Arrows
+  // --- RENDER ---
   const displayEval = liveEval !== null ? liveEval : (currentMoveIndex >= 0 ? analysis[currentMoveIndex]?.eval_cp : 0);
-  const evalPercent = Math.max(0, Math.min(100, 50 + (displayEval / 10))); 
-
+  const evalPercent = Math.max(5, Math.min(95, 50 + (displayEval / 10))); 
+  
   let arrowToDraw = [];
-  if (liveBestMove) {
-     arrowToDraw = [[liveBestMove.substring(0, 2), liveBestMove.substring(2, 4)]];
-  } else if (analysis[currentMoveIndex + 1]?.best_move) { // Look ahead to next move for historical analysis
-     // Note: In the new backend logic, 'best_move' is stored in the entry corresponding to the move that *just happened*.
-     // But for arrows, we actually want to know: "In the CURRENT position, what is best?"
-     // The backend stores "best_move" alongside the move that was played.
-     // So if we are at move 5, we look at analysis[5] to see what we SHOULD have done instead of move 6.
-     // Actually, let's keep it simple: Use the best_move from the *next* array item if it exists.
-     const nextData = analysis[currentMoveIndex + 1];
-     if (nextData && nextData.best_move) {
-         arrowToDraw = [[nextData.best_move.substring(0, 2), nextData.best_move.substring(2, 4)]];
-     }
+  if (liveBestMove) arrowToDraw = [[liveBestMove.substring(0, 2), liveBestMove.substring(2, 4)]];
+  else if (analysis[currentMoveIndex + 1]?.best_move) {
+     const bm = analysis[currentMoveIndex + 1].best_move;
+     if(bm) arrowToDraw = [[bm.substring(0, 2), bm.substring(2, 4)]];
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-8 font-sans">
-      <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
-        {/* LEFT COLUMN: Board */}
+    <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans selection:bg-emerald-500/30">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-4">
-          <div className="bg-gray-800 p-4 rounded-xl shadow-2xl flex gap-4">
-            
+          <div className="bg-slate-900 p-4 rounded-xl shadow-2xl border border-slate-800 flex gap-4 relative">
+             
             {/* Eval Bar */}
-            <div className="w-8 bg-gray-700 rounded-md relative overflow-hidden border border-gray-600">
-              <div 
-                className="absolute bottom-0 w-full bg-white transition-all duration-500 ease-in-out"
-                style={{ height: `${evalPercent}%` }}
-              ></div>
+            <div className="w-6 bg-slate-800 rounded relative overflow-hidden border border-slate-700 shadow-inner">
+               <div className="absolute inset-0 bg-gradient-to-b from-slate-800 to-slate-900 opacity-50"></div>
+               <div className="absolute bottom-0 w-full bg-gradient-to-t from-slate-200 to-white transition-all duration-500 ease-out shadow-[0_0_15px_rgba(255,255,255,0.3)]" style={{ height: `${evalPercent}%` }} />
             </div>
 
-            {/* Chessboard */}
-            <div className="flex-grow max-w-[600px] aspect-square">
+            {/* Chessboard Container */}
+            <div className="flex-grow aspect-square max-w-[650px] shadow-2xl rounded-lg overflow-hidden border border-slate-700 z-10">
               <Chessboard 
+                id="ChessboardID"
                 position={game.fen()} 
-                boardWidth={560}
                 onPieceDrop={onDrop}
-                arePiecesDraggable={true}
-                animationDuration={200}
-                snapToCursor={true}
-                customDarkSquareStyle={{ backgroundColor: '#779556' }}
-                customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
-                customArrows={arrowToDraw}
-                customArrowColor="rgba(0, 255, 0, 0.5)" 
+                arePiecesDraggable={true} 
+                customArrows={arrowToDraw} 
+                customDarkSquareStyle={{ backgroundColor: '#334155' }} 
+                customLightSquareStyle={{ backgroundColor: '#94a3b8' }}
+                animationDuration={250}
               />
             </div>
+            
+            {/* Loading Indicator (Small, Top Right, NOT blocking board) */}
+            {isLoading && (
+                 <div className="absolute top-4 right-4 bg-slate-900/90 px-3 py-1 rounded-full border border-emerald-500/50 flex items-center gap-2 z-20 shadow-lg">
+                    <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                    <span className="text-xs text-emerald-400 font-bold">Analyzing...</span>
+                 </div>
+             )}
           </div>
-
-          {/* Controls */}
-          <div className="flex justify-between items-center bg-gray-800 p-4 rounded-xl">
-            <button 
-                onClick={() => document.getElementById('pgn-upload').click()}
-                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-medium transition"
-            >
-                <Upload size={20} /> Upload PGN
-            </button>
-            <input type="file" id="pgn-upload" accept=".pgn" onChange={handleFileUpload} className="hidden" />
-
-            <div className="flex gap-2">
-                <button onClick={() => goToMove(currentMoveIndex - 1)} disabled={currentMoveIndex < 0} className="p-2 bg-gray-700 hover:bg-gray-600 rounded-lg disabled:opacity-50">
-                    <ChevronLeft size={24} />
+          
+          <EvaluationGraph data={getGraphData()} onMoveClick={goToMove} currentIndex={currentMoveIndex} />
+          
+          <div className="bg-slate-900 p-4 rounded-xl flex justify-between items-center border border-slate-800 shadow-lg">
+            <button onClick={() => document.getElementById('up').click()} className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-lg font-bold flex gap-2 transition-all shadow-[0_4px_14px_0_rgba(16,185,129,0.39)] active:scale-95"><Upload size={18}/> Analyze PGN</button>
+            <input type="file" id="up" hidden onChange={handleFileUpload} />
+            
+            <div className="flex gap-4 items-center">
+                <button onClick={() => setSoundEnabled(!soundEnabled)} className="p-2 text-slate-400 hover:text-emerald-400 transition-colors">
+                    {soundEnabled ? <Volume2 size={20}/> : <VolumeX size={20}/>}
                 </button>
-                <button onClick={() => goToMove(currentMoveIndex + 1)} disabled={currentMoveIndex >= analysis.length - 1} className="p-2 bg-gray-700 hover:bg-gray-600 rounded-lg disabled:opacity-50">
-                    <ChevronRight size={24} />
-                </button>
+                <div className="flex gap-1 bg-slate-800 p-1 rounded-lg border border-slate-700">
+                    <button onClick={() => goToMove(currentMoveIndex - 1)} className="p-2.5 hover:bg-slate-700 rounded text-slate-300"><ChevronLeft/></button>
+                    <button onClick={() => goToMove(currentMoveIndex + 1)} className="p-2.5 hover:bg-slate-700 rounded text-slate-300"><ChevronRight/></button>
+                </div>
             </div>
           </div>
         </div>
 
-        {/* RIGHT COLUMN: Analysis */}
-        <div className="bg-gray-800 rounded-xl p-6 shadow-xl flex flex-col h-[700px]">
-          <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-            <FileText className="text-blue-400"/> Analysis Report
-          </h2>
-
-          {isLoading ? (
-            <div className="flex-grow flex items-center justify-center text-blue-400 animate-pulse">Analyzing positions...</div>
-          ) : analysis.length === 0 && !liveEval ? (
-            <div className="text-gray-500 text-center mt-10">Upload a PGN file or move pieces to start.</div>
-          ) : (
-            <>
-              <div className="bg-gray-700 p-4 rounded-lg mb-4">
-                <div className="text-gray-400 text-sm">{liveEval !== null ? "Live Evaluation" : "Evaluation"}</div>
-                <div className={`text-3xl font-bold ${displayEval > 0 ? 'text-green-400' : displayEval < 0 ? 'text-red-400' : 'text-white'}`}>
-                    {displayEval === "..." ? "..." : formatEval(displayEval)}
+        <div className="bg-slate-900 rounded-xl flex flex-col h-[600px] border border-slate-800 shadow-xl overflow-hidden">
+          <div className="p-5 border-b border-slate-800 bg-slate-900/50 backdrop-blur">
+            <h2 className="text-lg font-bold flex items-center gap-2 text-emerald-400 mb-4"><Activity className="w-5"/> Game Report</h2>
+            {accuracy ? (
+                <div className="grid grid-cols-2 gap-4 text-center">
+                    <div className="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+                        <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">White Accuracy</div>
+                        <div className="text-2xl font-black text-white">{accuracy.white}%</div>
+                    </div>
+                    <div className="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+                        <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">Black Accuracy</div>
+                        <div className="text-2xl font-black text-white">{accuracy.black}%</div>
+                    </div>
                 </div>
-              </div>
+            ) : <div className="text-center text-slate-500 text-sm italic py-4 bg-slate-800/30 rounded border border-slate-800/50">Upload a PGN to unlock full game insights.</div>}
+          </div>
 
-              <div className="flex-grow overflow-y-auto pr-2 space-y-1" ref={moveListRef}>
-                {analysis.map((move, index) => {
-                   const isWhite = index % 2 === 0;
-                   const moveNum = Math.floor(index / 2) + 1;
-                   
-                   return isWhite ? (
-                     <div key={index} className="flex items-center gap-2 mt-2">
-                       <span className="text-gray-500 w-6 text-sm">{moveNum}.</span>
-                       
-                       {/* WHITE MOVE */}
-                       <button onClick={() => goToMove(index)} className={`flex-1 text-left px-3 py-2 rounded ${currentMoveIndex === index && liveEval === null ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}>
-                         <span className={`font-bold ${analysis[index].color || 'text-white'}`}>
-                            {analysis[index].san} {getMoveSymbol(analysis[index].classification)}
-                         </span>
-                         <span className="float-right text-xs opacity-70">{formatEval(analysis[index].eval_cp)}</span>
-                       </button>
-
-                       {/* BLACK MOVE */}
-                       {analysis[index + 1] && (
-                         <button onClick={() => goToMove(index + 1)} className={`flex-1 text-left px-3 py-2 rounded ${currentMoveIndex === index + 1 && liveEval === null ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}>
-                           <span className={`font-bold ${analysis[index + 1].color || 'text-white'}`}>
-                             {analysis[index + 1].san} {getMoveSymbol(analysis[index + 1].classification)}
-                           </span>
-                           <span className="float-right text-xs opacity-70">{formatEval(analysis[index + 1].eval_cp)}</span>
-                         </button>
-                       )}
-                     </div>
-                   ) : null;
-                })}
-              </div>
-            </>
-          )}
-          {error && <div className="mt-4 text-red-400 text-center text-sm">{error}</div>}
+          <div className="flex-grow overflow-y-auto custom-scrollbar bg-slate-950 p-2" ref={moveListRef}>
+             {analysis.map((move, i) => {
+               if (i % 2 !== 0) return null;
+               const w = move;
+               const b = analysis[i+1];
+               const wActive = currentMoveIndex === i;
+               const bActive = currentMoveIndex === i+1;
+               return (
+                 <div key={i} className="flex gap-1 mb-1 text-sm group">
+                   <div className="w-8 text-slate-500 text-right pr-2 py-1.5 font-mono opacity-50">{Math.floor(i/2)+1}.</div>
+                   <button onClick={() => goToMove(i)} data-active={wActive} className={`flex-1 text-left px-3 py-1.5 rounded-md flex justify-between items-center transition-all ${wActive ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/50' : 'text-slate-300 hover:bg-slate-800'}`}>
+                     <span className="font-bold flex gap-1">{w.san} {getMoveBadge(w.classification)}</span>
+                     <span className="opacity-40 font-mono text-[10px]">{formatEval(w.eval_cp)}</span>
+                   </button>
+                   {b && <button onClick={() => goToMove(i+1)} data-active={bActive} className={`flex-1 text-left px-3 py-1.5 rounded-md flex justify-between items-center transition-all ${bActive ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/50' : 'text-slate-300 hover:bg-slate-800'}`}>
+                     <span className="font-bold flex gap-1">{b.san} {getMoveBadge(b.classification)}</span>
+                     <span className="opacity-40 font-mono text-[10px]">{formatEval(b.eval_cp)}</span>
+                   </button>}
+                 </div>
+               )
+            })}
+          </div>
         </div>
       </div>
     </div>
